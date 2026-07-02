@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pump Seed Cryptographic Auditor</title>
+    <!-- Include CryptoJS for handling HMAC-SHA256 and SHA256 in the browser -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        .container {
+            background-color: #1e293b;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        h2 { margin-top: 0; color: #38bdf8; }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #cbd5e1;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            background-color: #0f172a;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            color: #fff;
+            box-sizing: border-box;
+            font-family: monospace;
+        }
+        input:focus {
+            border-color: #38bdf8;
+            outline: none;
+        }
+        button {
+            background-color: #0284c7;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+            margin-top: 10px;
+        }
+        button:hover { background-color: #0369a1; }
+        button:disabled { background-color: #475569; cursor: not-allowed; }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #0f172a;
+            border-radius: 6px;
+            border-left: 4px solid #38bdf8;
+            display: none;
+        }
+        #output {
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            background-color: #0f172a;
+            padding: 20px;
+            border-radius: 6px;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #334155;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>--- PUMP SEED CRYPTOGRAPHIC AUDIT ---</h2>
+    
+    <div class="input-group">
+        <label for="clientSeed">Client Seed</label>
+        <input type="text" id="clientSeed" placeholder="Enter client seed...">
+    </div>
+    
+    <div class="input-group">
+        <label for="hashedSeed">Hashed Server Seed</label>
+        <input type="text" id="hashedSeed" placeholder="Enter hashed server seed...">
+    </div>
+    
+    <div class="input-group">
+        <label for="unhashedSeed">Unhashed Server Seed</label>
+        <input type="text" id="unhashedSeed" placeholder="Enter unhashed server seed...">
+    </div>
+    
+    <div class="input-group">
+        <label for="totalNonces">Total Nonces to Scan</label>
+        <input type="number" id="totalNonces" value="500000">
+    </div>
+    
+    <button id="scanBtn" onclick="startScan()">Start Complete Audit</button>
+    
+    <div id="statusBox" class="status"></div>
+    <div id="output">Results will appear here...</div>
+</div>
+
+<script>
+const expertTiers = [
+    0.00, 1.00, 1.63, 2.80, 4.95, 9.08, 17.34, 34.68, 
+    73.21, 164.72, 400.02, 1066.73, 3200.18, 11200.65, 
+    48536.13, 291216.80, 3203384.80
+];
+
+function formatMultiplier(val) {
+    return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + 'x';
+}
+
+function startScan() {
+    const clientSeed = document.getElementById('clientSeed').value.trim();
+    const hashedSeed = document.getElementById('hashedSeed').value.trim();
+    const unhashedSeed = document.getElementById('unhashedSeed').value.trim();
+    const totalNonces = parseInt(document.getElementById('totalNonces').value);
+    
+    const statusBox = document.getElementById('statusBox');
+    const output = document.getElementById('output');
+    const scanBtn = document.getElementById('scanBtn');
+    
+    if (!clientSeed || !hashedSeed || !unhashedSeed) {
+        alert("Please fill in all inputs before starting.");
+        return;
+    }
+    
+    // 1. Verify Unhashed matches Hashed
+    const verifiedHash = CryptoJS.SHA256(unhashedSeed).toString(CryptoJS.enc.Hex);
+    if (verifiedHash !== hashedSeed) {
+        statusBox.style.display = 'block';
+        statusBox.style.borderLeftColor = '#ef4444';
+        statusBox.innerHTML = "⚠️ <strong>WARNING:</strong> Server seed verification failed! Unhashed seed does not match hash receipt.";
+        output.innerHTML = "";
+        return;
+    }
+    
+    // Setup UI for scanning state
+    scanBtn.disabled = true;
+    statusBox.style.display = 'block';
+    statusBox.style.borderLeftColor = '#38bdf8';
+    output.innerHTML = "";
+    
+    let foundMaxHits = [];
+    let highestTierIndexFound = 0;
+    let nonceOfHighestPeak = 1;
+    
+    let currentNonce = 1;
+    const batchSize = 2000; // Chunk nonces together to keep the UI perfectly responsive
+
+    function processBatch() {
+        const endNonce = Math.min(currentNonce + batchSize - 1, totalNonces);
+        
+        for (let nonce = currentNonce; nonce <= endNonce; nonce++) {
+            // Replicate message hash sequences
+            const msg0 = CryptoJS.enc.Utf8.parse(`${clientSeed}:${nonce}:0`);
+            const msg1 = CryptoJS.enc.Utf8.parse(`${clientSeed}:${nonce}:1`);
+            const key = CryptoJS.enc.Utf8.parse(unhashedSeed);
+            
+            const hash0 = CryptoJS.HmacSHA256(msg0, key);
+            const hash1 = CryptoJS.HmacSHA256(msg1, key);
+            
+            // Reconstruct unified byte array window matching Python sequence
+            let byteSequence = [];
+            
+            // Get all 32 bytes from hash0
+            const words0 = hash0.words;
+            for (let i = 0; i < 8; i++) {
+                const w = words0[i];
+                byteSequence.push((w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF);
+            }
+            // Get first 8 bytes from hash1
+            const words1 = hash1.words;
+            for (let i = 0; i < 2; i++) {
+                const w = words1[i];
+                byteSequence.push((w >> 24) & 0xFF, (w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF);
+            }
+            
+            // Fisher-Yates element simulation
+            let items = Array.from({length: 25}, (_, i) => i);
+            let byteIndex = 0;
+            let popPoint = 25;
+            
+            for (let i = 0; i < 10; i++) {
+                const b0 = byteSequence[byteIndex] / 256;
+                const b1 = byteSequence[byteIndex + 1] / Math.pow(256, 2);
+                const b2 = byteSequence[byteIndex + 3] / Math.pow(256, 3); // Bug fixed mapping offset alignment parity check
+                const b3 = byteSequence[byteIndex + 2] / Math.pow(256, 4);
+                
+                // Adjusted fallback calculations
+                const rawFloat = (byteSequence[byteIndex] / 256) + 
+                                 (byteSequence[byteIndex+1] / 65536) + 
+                                 (byteSequence[byteIndex+2] / 16777216) + 
+                                 (byteSequence[byteIndex+3] / 4294967296);
+                byteIndex += 4;
+                
+                const chosenIndex = Math.floor(rawFloat * (25 - i));
+                const pulledValue = items.splice(chosenIndex, 1)[0];
+                
+                if (pulledValue < popPoint) {
+                    popPoint = pulledValue;
+                }
+            }
+            
+            if (popPoint > 16) popPoint = 16;
+            const maxSafePump = popPoint > 0 ? popPoint - 1 : 0;
+            
+            if (maxSafePump > highestTierIndexFound) {
+                highestTierIndexFound = maxSafePump;
+                nonceOfHighestPeak = nonce;
+            }
+            
+            if (popPoint >= 16) {
+                output.innerHTML += `🎯 <strong>YES!</strong> Nonce ${nonce} hit the LAST HIGHEST MULTIPLIER! Max Hit: ${formatMultiplier(expertTiers[maxSafePump])}\n`;
+                foundMaxHits.push(nonce);
+            }
+        }
+        
+        statusBox.innerHTML = `⏳ <strong>Auditing:</strong> Checked nonces up to ${endNonce.toLocaleString()} / ${totalNonces.toLocaleString()}...`;
+        
+        if (endNonce < totalNonces) {
+            currentNonce = endNonce + 1;
+            setTimeout(processBatch, 0); // Handle background thread suspension loop frame
+        } else {
+            // Render scan completion report layout
+            scanBtn.disabled = false;
+            statusBox.innerHTML = "✅ <strong>Audit Complete!</strong> All nonces checked successfully.";
+            
+            let summary = `\n--- FINAL SCAN RESULTS ---\n`;
+            if (foundMaxHits.length > 0) {
+                summary += `Total nonces that hit the last highest multiplier: ${foundMaxHits.length}\n`;
+                summary += `List of nonces hitting max multiplier: [${foundMaxHits.join(', ')}]\n`;
+            } else {
+                summary += `❌ Out of limit (No nonces hit the last highest multiplier in this range).\n`;
+                summary += `🔝 The HIGHEST multiplier hit in all games was: ${formatMultiplier(expertTiers[highestTierIndexFound])} (at Nonce ${nonceOfHighestPeak})\n`;
+            }
+            output.innerHTML += summary;
+        }
+    }
+    
+    // Init execution call loop
+    setTimeout(processBatch, 0);
+}
+</script>
+
+</body>
+      </html>
+      
